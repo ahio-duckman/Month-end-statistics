@@ -1,0 +1,15 @@
+# Excel files
+*.xlsm
+*.xlsb
+*.xlsx
+*.xlsm~ # Excelの一時ファイル
+~$*
+
+# CSV files (if you don't want to track data files)
+*.csv
+
+# Userform binary files (can be noisy in Git diffs)
+*.frx
+
+# Other temporary files
+*.tmp

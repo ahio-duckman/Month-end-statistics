@@ -1,134 +1,7 @@
-Attribute VB_Name = "Module_MainProcess"
-Option Explicit
-
-' --- 定数定義 ---
-' シート名
-Private Const SHEET_NAME_TABLE As String = "table"
-
-' 出席簿シートのセル範囲
-Private Const ROW_DATE As Long = 3
-Private Const ROW_WEEKDAY As Long = 4
-Private Const COL_START_DATE As Long = 7 ' G列 (日付の開始列)
-
-Private Const ROW_STUDENT_START As Long = 6
-Private Const ROW_STUDENT_END As Long = 50
-Private Const COL_STUDENT_NUMBER As Long = 1 ' A列
-Private Const COL_STUDENT_NAME As Long = 2 ' B列 (列番号で指定)
-
-' 集計列の定義 (AL列からAR列)
-Private Const COL_SUM_SHUTTEI As Long = 38 ' AL列 (出停)
-Private Const COL_SUM_KIBIKI As Long = 39 ' AM列 (忌引き)
-Private Const COL_SUM_KESSEKI As Long = 40 ' AN列 (欠席)
-Private Const COL_SUM_KOUKETSU As Long = 41 ' AO列 (公欠)
-Private Const COL_SUM_ATTENDANCE As Long = 42 ' AP列 (出席日数)
-Private Const COL_SUM_CHIKOKU As Long = 43 ' AQ列 (遅刻)
-Private Const COL_SUM_SOUTAI As Long = 44 ' AR列 (早退)
-
-
-Private Const CELL_WAREKI As String = "A2"
-Private Const CELL_MONTH As String = "E2"
-Private Const CELL_GRADE As String = "S2"
-Private Const CELL_CLASS As String = "W2"
-Private Const CELL_TEACHER As String = "AD2"
-Private Const CELL_SCHOOL_DAY_COUNT As String = "B52" ' 授業日数を格納するセル
-
-' 生徒名簿CSV関連
-Private Const CSV_FILE_NAME As String = "児童生徒登録用名簿.csv"
-Private Const CSV_COL_CLASS As Long = 4  ' D列
-Private Const CSV_COL_STUDENT_NUMBER As Long = 5 ' E列
-Private Const CSV_COL_STUDENT_NAME As Long = 6 ' F列
-Private Const CSV_COL_STATUS As Long = 12 ' L列 (1:有効, 0:利用停止)
-
-' 欠席連絡CSV関連
-Private Const ABSENCE_FILE_NAME As String = "欠席連絡.csv"
-Private Const ABSENCE_COL_DATE As Long = 1    ' A列
-Private Const ABSENCE_COL_GRADE As Long = 2  ' B列
-Private Const ABSENCE_COL_CLASS As Long = 3  ' C列
-Private Const ABSENCE_COL_STUDENT_NUMBER As Long = 4 ' D列
-Private Const ABSENCE_COL_CONTACT_TYPE As Long = 7 ' G列
-Private Const ABSENCE_COL_REASON As Long = 10 ' J列
-
-' その他
-Private Const MAX_STUDENTS_ON_SHEET As Long = 50 ' 出席簿シートに表示する最大生徒数
-
-' --- 主なプロシージャ ---
-
-Public Sub 出席簿ひな形作成()
-    Dim ws As Worksheet
-    Dim teacherName As String
-    Dim grade As String
-    Dim classNum As String
-    Dim currentYear As Integer
-    Dim currentMonth As Integer
-    Dim lastDay As Integer
-    Dim forceSchoolDays() As Integer
-    Dim forceHolidays() As Integer
-    Dim vacationStartDate As Date ' 長期休暇開始日
-    Dim vacationEndDate As Date   ' 長期休暇終了日
-    Dim studentCount As Integer
-
-    ' 1. シートの準備とクリア
-    Set ws = PrepareAttendanceSheet()
-    If ws Is Nothing Then Exit Sub ' シート準備失敗時は終了
-
-    ' 2. ユーザー入力の取得
-    ' 長期休暇の開始日と終了日を取得する引数を追加
-    If Not GetUserInputs(teacherName, grade, classNum, currentYear, currentMonth, _
-                         forceSchoolDays, forceHolidays, vacationStartDate, vacationEndDate) Then
-        MsgBox "ユーザー入力がキャンセルされたため、処理を中断します。", vbInformation, "処理中断"
-        Exit Sub ' 入力キャンセル時は終了
-    End If
-
-    ' 3. 基本情報の書き込み（和暦、月、学年、クラス、担任名）
-    Call WriteBasicInfo(ws, teacherName, grade, classNum, currentYear, currentMonth)
-
-    ' 4. 日付と曜日の生成
-    lastDay = SetDatesAndWeekdays(ws, currentYear, currentMonth)
-
-    ' 5. 生徒名簿の読み込みと転記
-    studentCount = LoadAndWriteStudentList(ws, grade, classNum)
-    Dim lastStudentDataRow As Long
-    If studentCount > 0 Then
-        lastStudentDataRow = ROW_STUDENT_START + studentCount - 1
-    Else
-        ' 生徒がいない場合でも、日付の罫線描画のために最低限の行範囲を設定
-        lastStudentDataRow = ROW_STUDENT_END
-    End If
-
-    ' 6. 休日判定、罫線と祝日名の描画、授業日数のカウント
-    Dim schoolDayCount As Long
-    ' ★ 修正: vacationStartDate と vacationEndDate を引数に追加
-    schoolDayCount = DrawHolidayLinesAndLabels(ws, currentYear, currentMonth, _
-                                             lastDay, lastStudentDataRow, _
-                                             forceSchoolDays, forceHolidays, _
-                                             vacationStartDate, vacationEndDate)
-    ws.Range(CELL_SCHOOL_DAY_COUNT).Value = schoolDayCount ' 授業日数をセルに書き込み
-
-    ' 7. 長期休暇の斜め線描画
-    If vacationStartDate <> 0 And vacationEndDate <> 0 Then ' 日付が有効な場合のみ描画
-        Call DrawSingleVacationLine(ws, currentYear, currentMonth, studentCount, vacationStartDate, vacationEndDate)
-    End If
-
-    ' 8. 集計列のクリアと準備 (欠席情報反映前にクリアしておく)
-    Call ClearAndPrepareSummaryColumns(ws)
-
-    ' 9. 欠席情報の反映確認
-    If MsgBox("欠席連絡からの情報を反映しますか？", vbYesNo + vbQuestion, "欠席情報反映") = vbYes Then
-        Call 欠席情報反映(grade, classNum, currentYear, currentMonth) ' 既存プロシージャを呼び出し
-    End If
-    
-    ' 10. 集計を実行 (欠席情報反映後に実行する)
-    Call CalculateAttendanceSummary(ws, lastDay, studentCount, schoolDayCount)
-
-    MsgBox "出席簿のひな形が作成されました。" & vbCrLf & _
-           "生徒名を " & studentCount & " 件登録しました。" & vbCrLf & _
-           "授業日数: " & schoolDayCount & " 日", vbInformation, "完了"
-End Sub
-
 ' --- プライベート関数とプロシージャ ---
 
 ' ★ 1. シートの準備とクリアを行う関数
-Private Function PrepareAttendanceSheet() As Worksheet
+Public Function PrepareAttendanceSheet() As Worksheet
     Dim ws As Worksheet
 
     On Error Resume Next
@@ -201,7 +74,7 @@ Private Function PrepareAttendanceSheet() As Worksheet
 End Function
 
 ' ★ 2. ユーザー入力の取得を行う関数 (長期休暇の引数を追加)
-Private Function GetUserInputs(ByRef teacherName As String, ByRef grade As String, ByRef classNum As String, _
+Public Function GetUserInputs(ByRef teacherName As String, ByRef grade As String, ByRef classNum As String, _
                                ByRef currentYear As Integer, ByRef currentMonth As Integer, _
                                ByRef forceSchoolDays() As Integer, ByRef forceHolidays() As Integer, _
                                ByRef vacationStartDate As Date, ByRef vacationEndDate As Date) As Boolean
@@ -355,7 +228,7 @@ Private Function ParseCommaSeparatedNumbers(ByVal inputString As String) As Inte
 End Function
 
 ' ★ 3. 基本情報をシートに書き込むプロシージャ
-Private Sub WriteBasicInfo(ws As Worksheet, teacherName As String, grade As String, classNum As String, _
+Public Sub WriteBasicInfo(ws As Worksheet, teacherName As String, grade As String, classNum As String, _
                            currentYear As Integer, currentMonth As Integer)
     ws.Range(CELL_GRADE).Value = grade
     ws.Range(CELL_CLASS).Value = classNum
@@ -370,7 +243,7 @@ Private Sub WriteBasicInfo(ws As Worksheet, teacherName As String, grade As Stri
 End Sub
 
 ' ★ 4. 日付と曜日をシートに設定する関数
-Private Function SetDatesAndWeekdays(ws As Worksheet, currentYear As Integer, currentMonth As Integer) As Integer
+Public Function SetDatesAndWeekdays(ws As Worksheet, currentYear As Integer, currentMonth As Integer) As Integer
     Dim lastDay As Integer
     lastDay = day(DateSerial(currentYear, currentMonth + 1, 0)) ' その月の最終日を計算
 
@@ -392,7 +265,7 @@ Private Function SetDatesAndWeekdays(ws As Worksheet, currentYear As Integer, cu
 End Function
 
 ' ★ 5. 生徒名簿を読み込み、シートに転記する関数
-Private Function LoadAndWriteStudentList(ws As Worksheet, grade As String, classNum As String) As Integer
+Public Function LoadAndWriteStudentList(ws As Worksheet, grade As String, classNum As String) As Integer
     Dim csvFile As String
     Dim csvWB As Workbook
     Dim csvWS As Worksheet
@@ -441,7 +314,7 @@ Private Function LoadAndWriteStudentList(ws As Worksheet, grade As String, class
 End Function
 
 ' ★ 6. 休日判定、罫線と祝日名の描画、授業日数のカウントを行う関数
-Private Function DrawHolidayLinesAndLabels(ws As Worksheet, currentYear As Integer, currentMonth As Integer, _
+Public Function DrawHolidayLinesAndLabels(ws As Worksheet, currentYear As Integer, currentMonth As Integer, _
                                             lastDay As Integer, lastStudentDataRow As Long, _
                                             forceSchoolDays() As Integer, forceHolidays() As Integer, _
                                             vacationStartDate As Date, vacationEndDate As Date) As Long ' ★ 追加引数
@@ -808,7 +681,7 @@ Private Function GetNationalHolidayNameWithoutSubstitute(targetDate As Date) As 
 End Function
 
 ' ★ 長期休暇のセル範囲に1本の斜め線を引くプロシージャ
-Private Sub DrawSingleVacationLine(ws As Worksheet, currentYear As Integer, currentMonth As Integer, _
+Public Sub DrawSingleVacationLine(ws As Worksheet, currentYear As Integer, currentMonth As Integer, _
                                   studentCount As Integer, vacationStartDate As Date, vacationEndDate As Date)
     Dim startDay As Integer
     Dim endDay As Integer
@@ -936,7 +809,7 @@ AddTextboxErrorHandler:
 End Sub
 
 ' ★ 集計列をクリアするプロシージャ
-Private Sub ClearAndPrepareSummaryColumns(ws As Worksheet)
+Public Sub ClearAndPrepareSummaryColumns(ws As Worksheet)
     ' AL列からAR列までの集計範囲をクリア
     ws.Range(ws.Cells(ROW_STUDENT_START, COL_SUM_SHUTTEI), ws.Cells(ROW_STUDENT_END, COL_SUM_SOUTAI)).ClearContents
 End Sub
@@ -1134,7 +1007,7 @@ Public Sub 欠席情報反映(Optional ByVal inputGrade As String = "", Optional ByVal
 End Sub
 
 ' ★ 出席簿の集計を行うプロシージャ
-Private Sub CalculateAttendanceSummary(ws As Worksheet, lastDayOfMonth As Integer, studentCount As Integer, schoolDayCount As Long)
+Public Sub CalculateAttendanceSummary(ws As Worksheet, lastDayOfMonth As Integer, studentCount As Integer, schoolDayCount As Long)
     Dim row As Long
     Dim col As Long
     Dim studentDataRange As Range
